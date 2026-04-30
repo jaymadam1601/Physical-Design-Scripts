@@ -1,0 +1,42 @@
+#!/bin/bash
+
+if [ "$#" -ne 1 ]; then
+    echo "Usage: $0 <directory>"
+    exit 1
+fi
+
+gzip_file="$1/timing/dmsa/rpts/*/*noise_slack_failure*"
+
+# Check if files exist
+if ! ls $gzip_file 1> /dev/null 2>&1; then
+    echo "Error: No matching files found in '$gzip_file'!"
+    exit 1
+fi
+
+zcat $gzip_file | awk '
+/\(.*\)/ && !/pin name/ {print} 
+/Aggressors:/,/Propagated:/ {print $1}' | egrep -v "Aggressors:|Propagated:" | awk '
+/\(.*\)/ {
+    match($0, /\(([^)]+)\)/, arr);
+    key = arr[1];
+    if (noise[key] == "") {
+        noise[key] = $0;
+    } else {
+        noise[key] = noise[key] " " $0;
+    }
+} 
+!/\(.*\)/ {
+    if (key) {
+        noise[key] = noise[key] " " $0;
+    }
+} 
+END {
+	j=1
+    for (n in noise) {
+        print "set noise(" n","j") [list " noise[n] "]"
+		j=j+1
+    }
+}' > noise_nets.tcl
+
+echo "Processed noise nets saved to noise_nets.tcl"
+

@@ -1,0 +1,31 @@
+#!/bin/sh
+
+switch_jobs() {
+    local queue="$1"
+    local exclude_pattern="$2"
+    
+    if [ -n "$exclude_pattern" ]; then
+		job_list=$(gstat | egrep -v "$exclude_pattern"  | awk '/PEND/ {print $1}')
+	else
+		job_list=$(gstat | awk '/PEND/ {print $1}')
+	fi
+    if [ -n "$job_list" ]; then
+        echo "$job_list" | xargs bswitch "$queue"
+		echo "Switching jobs to $queue exluding $exclude_pattern "
+    else 
+		echo "No pending Jobs (︶︹︶) 💤......"
+	fi  
+}
+
+while true; do
+    #switch_jobs medium ""
+    #sleep 30s 
+    #switch_jobs large ""
+    #sleep 30s 
+    #switch_jobs mp ""
+    #sleep 30s 
+    switch_jobs priority "priority"
+    sleep 30s 
+    #switch_jobs xlarge ""
+    #sleep 30s 
+done  

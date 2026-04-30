@@ -1,0 +1,14 @@
+
+awk -F"|" -v field="in2reg" 'BEGIN {col=-1; out=""} $0 ~ field {line=NR+4; for (i=1; i<=NF; i++) {gsub(/^[ \t]+|[ \t]+$/, "", $i); if ($i==field) {col=i; break}}; next} NF > 0 && NR <= line && col > 0 {out=out ? out "/" $col : $col} END {print out}'
+
+awk 'BEGIN {start="";end="";slack="";unce="";launch=""; captu=""} /Beginpoint:/ {start=$2} /Endpoint:/ {end=$2} /Uncertainty/ {unce=$3} /Slack Time/ {slack=$4} /Timing Path:/ {getline; getline; getline; getline; getline; launch=$1} /Other End Path:/ {getline; getline; getline; getline; getline; captu=$1; print start"," end"," slack ","launch","captu","unce}'
+
+awk '/Illegally/,/Summary report for/' checkPinAssignment_initial.rpt | grep - | grep -v LEQ | awk '{print $2}' > illegal.tcl
+
+awk '/Beginpoint:/ {print prev; print $0; getline; print$0} {prev=$0}' #To print matched line previous line and next line
+
+awk 'BEGIN{pre_pre_line=""; pre_line=""} /\(net\)/ {if(pre_pre_line ~ /\(net\)/) {print pre_line, $0} else {printf "%s %s %s\n", pre_pre_line, pre_line, $0}} {pre_pre_line=pre_line; pre_line=$0}'
+
+awk 'BEGIN {line=""} {line=$2 " " $(NF-1); gsub("\\.\\.\\.*","",line); print line}'
+
+awk -F'at' '/ERROR,/ {gsub("[(),]","",$NF); print "createMarker -bbox {" $NF "}"}'

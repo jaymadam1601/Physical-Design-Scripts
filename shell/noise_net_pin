@@ -1,0 +1,24 @@
+#!/bin/bash
+
+if [ "$#" -ne 2 ]; then
+    echo "Usage: $0 avo_directory nets/pins"
+    exit 1
+fi
+
+noise_files="$1/timing/dmsa/rpts/*/*noise_slack_failure*"
+pin_or_net="$2"
+
+if ! ls $noise_files 1> /dev/null 2>&1; then
+    echo "Error: No matching files found in '$noise_files'!"
+    exit 1
+fi
+
+if [ "$pin_or_net" == "pins" ]; then
+zcat $noise_files | awk '
+/\(.*\)/ && !/pin name/ {print $1}' | sort -u 
+elif [ "$pin_or_net" == "nets" ]; then
+zcat $noise_files | awk '
+/\(.*\)/ && !/pin name/ {print $2}' | sort -u | sed 's/[()]//g' 
+else 
+	echo "Error: Only nets/pins can be given"
+fi
