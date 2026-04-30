@@ -1,0 +1,64 @@
+proc user_sinks_in_which_skew_groups {args} {
+    if {[lsearch $args "-help"] > -1} {
+        puts "Description:"
+        puts "check sink(s) are in which skew_group(s)"
+        puts "Usage: sinks_in_which_skew_groups \[-help\] <sinks>"
+        puts ""
+        puts "-help                                  # Prints out the command usage"
+        puts "<sinks>                                # specify sinks (also non-sink pins are supported) (string, required)"
+        puts ""
+        return
+    }
+    
+    ##################
+    ###=== main ===###
+    ##################
+    ## list up skew_groups sinks belonging to ##
+    puts "#### sink(s) #####"
+    foreach i $args {
+        set sink($i) [get_ccopt_property skew_groups_sink -pin $i]
+        if {1 <= [llength $sink($i)]} {
+            puts "  sink pin: $i belongs to [llength $sink($i)] skew_group(s) :"
+            foreach j $sink($i) {lappend skew_groups($j) $i}
+            set skew_group_rank ""
+            foreach j $sink($i) {lappend skew_group_rank "$j [get_ccopt_property exclusive_sinks_rank -skew_group $j]"}
+            set num 0
+            foreach j [lsort -index 1 -decreasing $skew_group_rank] {incr num; puts "    ($num) [lindex $j 0] \[rank=[lindex $j 1]\]"}
+            puts ""
+            continue
+        }
+        set nonsink($i) [get_ccopt_property skew_groups_active -pin $i]
+        if {1 <= [llength $nonsink($i)]} {
+            puts "  non-sink pin: $i belongs to [llength $nonsink($i)] skew_group(s) :"
+            foreach j $nonsink($i) {lappend skew_groups($j) $i}
+            set skew_group_rank ""
+            foreach j $nonsink($i) {lappend skew_group_rank "$j [get_ccopt_property exclusive_sinks_rank -skew_group $j]"}
+            set num 0
+            foreach j [lsort -index 1 -decreasing $skew_group_rank] {incr num; puts "    ($num) [lindex $j 0] \[rank=[lindex $j 1]\]"}
+            puts ""
+            continue
+        }
+        puts "  pin: $i does not belongs to any skew_group(s)\n"
+    }
+    set if_common_skew_group_exist 0
+    set skew_group_rank ""
+    foreach i [array names skew_groups] {
+        if {[llength $skew_groups($i)] > 1} {
+            set if_common_skew_group_exist 1
+            lappend skew_group_rank "$i [get_ccopt_property exclusive_sinks_rank -skew_group $i]"
+        }
+    }
+    if {$if_common_skew_group_exist} {
+        puts "#### skew_group(s) #####"
+        foreach i [lsort -index 1 -decreasing $skew_group_rank] {
+            set sg [lindex $i 0]
+            set rank [lindex $i 1]
+            puts "  skew_group $sg \[rank=$rank, total_sinks=[llength [get_ccopt_property sinks -skew_group $sg]]\] has [llength $skew_groups($sg)] of specified sink(s) :"
+            set num 0
+            foreach j $skew_groups($sg) {incr num; puts "    ($num) $j"}
+            puts ""
+        }
+    }
+}
+logCommand user_sinks_in_which_skew_groups
+
