@@ -1,0 +1,426 @@
+#!/usr/bin/perl
+use strict;
+use warnings;
+use Getopt::Long;
+
+# --- VT pattern list (editable per project/tech node) ---
+# 7nm
+my @cell_vt_pattern = qw(S8B L8B U8B);
+my $cell_pattern = "S8B/L8B/U8B";
+my $all_cell_pattern = "P6.*B_";
+
+# 2nm
+#my @cell_vt_pattern = qw(ENAA UNAA ULAA LNAA LLAA);
+#my $cell_pattern = "ENAA/UNAA/ULAA/LNAA/LLAA";
+#my $all_cell_pattern = "G5.*_";
+
+# 3nm
+#my @cell_vt_pattern = qw(UNRA ULRA LNRA LLRA);
+#my $cell_pattern = "UNRA/ULRA/LNRA/LLRA";
+#my $all_cell_pattern = "P1.*RA_";
+
+my $timing_rpt = $ARGV[0];
+die "Usage: perl generate_timing_summary <report_file>\n" unless defined $timing_rpt;
+
+my $is_gz = ($timing_rpt =~ /\.gz$/) ? 1 : 0;
+
+# --- Detect report type ---
+my ($is_invs_rpt, $is_pt_rpt);
+if ($is_gz) {
+	$is_invs_rpt = `zgrep -c "Beginpoint:" $timing_rpt`; chomp $is_invs_rpt;
+	$is_pt_rpt   = `zgrep -c "Startpoint:" $timing_rpt`;  chomp $is_pt_rpt;
+} else {
+	$is_invs_rpt = `grep -c "Beginpoint:" $timing_rpt`; chomp $is_invs_rpt;
+	$is_pt_rpt   = `grep -c "Startpoint:" $timing_rpt`;  chomp $is_pt_rpt;
+}
+
+my $which_rpt = $is_invs_rpt ? "invs" : $is_pt_rpt ? "pt" : die "ERROR: Given report is not valid or no paths are found!\n";
+
+# --- Open report ---
+my $fh;
+if ($is_gz) {
+	open($fh, "-|", "zcat", $timing_rpt) or die "Cannot run zcat on $timing_rpt: $!";
+} else {
+	open($fh, "<", $timing_rpt) or die "Cannot open $timing_rpt: $!";
+}
+
+if ($which_rpt eq "invs") {
+	# --- Fixed columns ---
+	my @fixed_cols = qw(PathNumber Startpoint Startpoint_clock Endpoint Endpoint_clock PathGroup Status Checktype LogicDepth BufferCount(Delay) InverterCount(Delay) CombCount(Delay));
+	
+	my @paths;
+	my @global_prop_order;
+	my %seen_props;
+	
+	my ($pathNumber, $checktype, $status, $startpoint, $startpoint_clock, $endpoint, $endpoint_clock, $pathgroup) = ("NA") x 8;
+	my $logic_depth = 0;
+	my %analysis_props;
+	my @current_path_prop_order;
+	my %vt_count;
+	my ($buf_count, $inv_count, $comb_count) = (0, 0, 0);
+	my ($buf_delay, $inv_delay, $comb_delay) = (0.0, 0.0, 0.0);
+	my $path_flag = 0;
+	my $analysis_flag = 0;
+	my $start_counting = 0;
+	
+	while (my $line = <$fh>) {
+		chomp $line;
+		next if $line =~ /^\s*$/;
+		# --- Path header ---
+		if ($line =~ /^Path\s+(\d+):/) {
+			if ($path_flag) {
+				# finalize previous path
+				my $final_depth = $logic_depth / 2;
+				$_ /= 2 for values %vt_count;
+				$buf_count  /= 2;
+				$inv_count  /= 2;
+				$comb_count /= 2;
+	
+				push @paths, {
+					PathNumber		=> $pathNumber,
+					Startpoint		=> $startpoint,
+					Startpoint_clock  => $startpoint_clock,
+					Endpoint		  => $endpoint,
+			   		Endpoint_clock	=> $endpoint_clock,
+					PathGroup		 => $pathgroup,
+					Status			=> $status,
+					Checktype		 => $checktype,
+					LogicDepth		=> $final_depth,
+					BufferCount	   => $buf_count,
+					InverterCount	 => $inv_count,
+					CombCount		 => $comb_count,
+					BufferDelay	   => sprintf("%.3f", $buf_delay),
+					InverterDelay	 => sprintf("%.3f", $inv_delay),
+					CombDelay		 => sprintf("%.3f", $comb_delay),
+					VTCount		   => { %vt_count },
+					props			 => { %analysis_props },
+					prop_order		=> [@current_path_prop_order],
+				};
+			}
+	
+			# reset vars for new path
+			($pathNumber, $checktype, $status, $startpoint, $startpoint_clock, $endpoint, $endpoint_clock, $pathgroup) = ("NA") x 8;
+			$logic_depth = 0;
+			%analysis_props = ();
+			@current_path_prop_order = ();
+			%vt_count = map { $_ => 0 } @cell_vt_pattern;
+			($buf_count, $inv_count, $comb_count) = (0, 0, 0);
+			($buf_delay, $inv_delay, $comb_delay) = (0, 0, 0);
+			$analysis_flag = 0;
+	
+			my @fields = split ' ', $line;
+			$pathNumber = $fields[1]; $pathNumber =~ s/:$//;
+			$status	= $fields[2];
+			$checktype = $fields[3];
+			$path_flag = 1;
+			next;
+		}
+	
+		# --- Basic info ---
+		if ($line =~ /^Beginpoint:/) {
+			my @fields = split ' ', $line;
+			$startpoint = $fields[1];
+			$startpoint_clock = $fields[-1];
+			$startpoint_clock =~ s/^['"]|['"]$//g;
+		} elsif ($line =~ /^Endpoint:/) {
+			my @fields = split ' ', $line;
+			$endpoint = $fields[1];
+			$endpoint_clock = $fields[-1];
+			$endpoint_clock =~ s/^['"]|['"]$//g;
+		} elsif ($line =~ /^Path Groups:/) {
+			my @fields = split ' ', $line;
+			$pathgroup = $fields[2];
+			$pathgroup =~ s/^\{|\}$//g;
+		}
+	
+		# --- Analysis View section ---
+		if ($line =~ /^Analysis View:/) {
+			$analysis_flag = 1;
+			next;
+		}
+		if ($analysis_flag) {
+			next if $line =~ /^\s*$/;
+			if ($line =~ /^..Slack Time\s+([+-]?\d+(\.\d+)?)/) {
+				$analysis_props{"Slack Time"} = $1;
+				push @current_path_prop_order, "Slack Time" unless grep { $_ eq "Slack Time" } @current_path_prop_order;
+				$analysis_flag = 0;
+				next;
+			}
+			if ($line =~ /^[+-=]?\s*([\w\s]+?)\s+([+-]?\d+(\.\d+)?)/) {
+				my ($prop, $value) = ($1, $2);
+				$prop =~ s/^\s+|\s+$//g;
+				$analysis_props{$prop} = $value;
+				push @current_path_prop_order, $prop unless grep { $_ eq $prop } @current_path_prop_order;
+			}
+		}
+	
+		# --- Logic depth, VT count & Delay categorization ---
+		my @fields_for_logic = split ' ', $line;
+		my $first_field = $fields_for_logic[0];
+		if ($first_field eq $startpoint && $line !~ /\(net\)/) {
+			my $merged_line = merge_single_field_lines($fh, $line);
+			$start_counting = 1;
+			next;
+		}
+		if ($first_field eq $endpoint && $line !~ /\(net\)/) {
+			my $merged_line = merge_single_field_lines($fh, $line);
+			$start_counting = 0;
+			next;
+		}
+	
+		if ($start_counting) {
+			my $merged_line = merge_single_field_lines($fh, $line);
+			next if $merged_line =~ /\(net\)/;
+			$logic_depth++;
+	
+			my @fields = split ' ', $merged_line;
+			my $cell  = $fields[1] // "";
+			my $delay = $fields[3] // 0.0;  # 4th field as per your input format
+	
+			# VT count
+			foreach my $vt (@cell_vt_pattern) {
+				$vt_count{$vt}++ if $cell =~ /$vt/;
+			}
+	
+			# Type classification & delay sum
+			if ($cell =~ /BUF/i) {
+				$buf_count++;
+				$buf_delay += $delay;
+			} elsif ($cell =~ /INV/i) {
+				$inv_count++;
+				$inv_delay += $delay;
+			} else {
+				$comb_count++;
+				$comb_delay += $delay;
+			}
+		}
+	}
+	
+	# --- Save last path ---
+	if ($path_flag) {
+		my $final_depth = $logic_depth / 2;
+		$_ /= 2 for values %vt_count;
+		$buf_count  /= 2;
+		$inv_count  /= 2;
+		$comb_count /= 2;
+	
+		push @paths, {
+			PathNumber		=> $pathNumber,
+			Startpoint		=> $startpoint,
+			Startpoint_clock  => $startpoint_clock,
+			Endpoint		  => $endpoint,
+			Endpoint_clock	=> $endpoint_clock,
+			PathGroup		 => $pathgroup,
+			Status			=> $status,
+			Checktype		 => $checktype,
+			LogicDepth		=> $final_depth,
+			BufferCount	   => $buf_count,
+			InverterCount	 => $inv_count,
+			CombCount		 => $comb_count,
+			BufferDelay	   => sprintf("%.3f", $buf_delay),
+			InverterDelay	 => sprintf("%.3f", $inv_delay),
+			CombDelay		 => sprintf("%.3f", $comb_delay),
+			VTCount		   => { %vt_count },
+			props			 => { %analysis_props },
+			prop_order		=> [@current_path_prop_order],
+		};
+	}
+	
+	# --- Collect all properties globally ---
+	if (@paths) {
+		@global_prop_order = @{ $paths[0]{prop_order} };
+		%seen_props = map { $_ => 1 } @global_prop_order;
+		foreach my $row_ref (@paths[1..$#paths]) {
+			foreach my $p (@{ $row_ref->{prop_order} }) {
+				unless ($seen_props{$p}) {
+					push @global_prop_order, $p;
+					$seen_props{$p} = 1;
+				}
+			}
+		}
+	}
+	
+	# --- Print CSV ---
+	my $vt_header = "VTCount (" . join("/", @cell_vt_pattern) . ")";
+	my @header = (@fixed_cols, $vt_header, @global_prop_order);
+	print join(",", @header), "\n";
+	
+	foreach my $row_ref (@paths) {
+		my @vt_counts = map { exists $row_ref->{VTCount}{$_} ? $row_ref->{VTCount}{$_} : 0 } @cell_vt_pattern;
+		my $vt_summary = join("/", @vt_counts);
+	
+		my @values = (
+			$row_ref->{PathNumber},
+			$row_ref->{Startpoint},
+			$row_ref->{Startpoint_clock},
+			$row_ref->{Endpoint},
+			$row_ref->{Endpoint_clock},
+			$row_ref->{PathGroup},
+			$row_ref->{Status},
+			$row_ref->{Checktype},
+			$row_ref->{LogicDepth},
+			sprintf("%d(%.3f)", $row_ref->{BufferCount},   $row_ref->{BufferDelay}),
+			sprintf("%d(%.3f)", $row_ref->{InverterCount}, $row_ref->{InverterDelay}),
+			sprintf("%d(%.3f)", $row_ref->{CombCount},	 $row_ref->{CombDelay}),
+			qq{"$vt_summary"},
+			map { exists $row_ref->{props}->{$_} ? $row_ref->{props}->{$_} : "" } @global_prop_order
+		);
+		print join(",", @values), "\n";
+	}
+} elsif ($which_rpt eq "pt") {
+	my $pathNumber 	= 0;
+	my $startpoint 	= "NA";
+	my $startpoint_clock = "NA";
+	my $endpoint	= "NA";
+	my $endpoint_clock = "NA";
+	my $endpoint_latency = 0;
+	my $pathgroup	= "NA";
+	my $pathtype 	= "NA";
+	my $scenario 	= "NA";
+	my $logicdepth 	= 0; my $buffercount = 0; my $invertercount = 0; my $combocount = 0;
+	my $bufferdelay = 0;
+	my $inverterdelay = 0;
+	my $combodelay = 0;
+	my $requiredtime = 0; my $rtfound = 0;
+	my $arrivaltime = 0; my $atfound = 0;
+	my $slack = 0;
+	my %vt_count;
+	
+	foreach my $vt (@cell_vt_pattern) {
+		$vt_count{$vt} = 0;
+	}
+	
+	my $first_startpoint = 0;
+	my $first_endpoint = 0;
+	my $startCounting = 0;
+	my $startpoint_found = 0;	
+	print "PathNumber Startpoint Startpoint_Clock Endpoint Endpoint_Clock PathGroup PathType Scenario LogicDepth BufferCount(Delay) InverterCount(Delay) CombCount(Delay) $cell_pattern RequiredTime ArrivalTime Slack\n";
+	while (my $line = <$fh>) {
+		chomp $line;
+		my @fields = split ' ', $line;
+		next if $line =~ /^\s*$/;
+		if ($line =~ /^.*Startpoint:/) {
+			$startpoint  = "NA";
+			$startpoint_clock = "NA";
+			$endpoint	= "NA";
+			$endpoint_clock = "NA";
+			$endpoint_latency = 0;
+			$pathgroup   = "NA";
+			$pathtype	= "NA";
+			$scenario	 = "NA";
+			$logicdepth  = 0; $buffercount = 0; $invertercount = 0; $combocount = 0;
+			$bufferdelay = 0;
+			$inverterdelay = 0;
+			$combodelay = 0;
+			$slack = 0;
+			$requiredtime = 0;
+			$arrivaltime = 0;
+	
+			foreach my $vt (@cell_vt_pattern) {
+				$vt_count{$vt} = 0;
+			}
+			$pathNumber += 1;
+			$first_startpoint = 0;
+			$first_endpoint = 1;
+			$startpoint_found = 0;
+			$startpoint = $fields[1];
+			$startpoint_clock = $fields[-1];
+			$startpoint_clock =~ s/\)//g;
+		} elsif ($line =~ /^.*Endpoint:/) {
+			$endpoint = $fields[1];
+			$endpoint_clock = $fields[-1];
+			$endpoint_clock =~ s/\)//g;
+		} elsif ($line =~ /^.*Path Group:/) {
+			$pathgroup = $fields[2];
+		} elsif ($line =~ /^.*Path Type:/) {
+			$pathtype = $fields[2];
+		} elsif ($line =~ /^.*Scenario:/) {
+			$scenario = $fields[1];
+		}
+		
+		if ($line =~ /^.* \Q$startpoint\E(?:\/\S+)?(?:\s|$)/ && $line !~ /^.*Startpoint:/ && $line !~ /^.*Endpoint:/ && $line !~ /\(net\)/ && $startpoint_found != 1 ) {
+				if ($line =~ /\(in\)/) {
+					$startCounting = 1;
+					$startpoint_found = 1;
+				} else {
+					if ($first_startpoint == 0) {
+						$first_startpoint = 1;
+					} elsif ($first_startpoint == 1) {
+						$startCounting = 1;
+						$startpoint_found = 1;
+					}
+				}
+				next;
+		}
+		if ($startCounting == 1 && $line !~ /^.* \Q$startpoint\E(?:\/\S+)?(?:\s|$)/ && $line !~ /^.* \Q$endpoint\E(?:\/\S+)?(?:\s|$)/ && $line =~ /$all_cell_pattern/) {
+			if ($line !~ /\(net\)/) {
+				foreach my $vt (@cell_vt_pattern) {
+					if ($fields[1] =~ /$vt/) {
+						$vt_count{$vt} += 1;
+					}
+				}
+				$logicdepth += 1;
+				if ($fields[1] =~ /.*BUF.*/ || $fields[1] =~ /.*DLY.*/) {
+					$buffercount += 1;
+					$bufferdelay += $fields[9];
+				} elsif	($fields[1] =~ /.*INV.*/) {
+					$invertercount += 1;
+					$inverterdelay += $fields[9];
+				} else {
+					$combocount += 1;
+					$combodelay += $fields[9];
+				}
+			}
+		}
+		if ($line =~ /^.* \Q$endpoint\E(?:\/\S+)?(?:\s|$)/ && $line !~ /^.*Endpoint:/ ) {
+			if ($first_endpoint == 1) {
+				$first_endpoint = 0;
+				$startCounting = 0;
+				$logicdepth /= 2;
+				$buffercount /= 2;
+				$invertercount /= 2;
+				$combocount /= 2;
+				$bufferdelay = sprintf("%.3f", $bufferdelay);
+				$inverterdelay = sprintf("%.3f", $inverterdelay);
+				$combodelay = sprintf("%.3f", $combodelay);
+	
+				foreach my $vt (@cell_vt_pattern) {
+					$vt_count{$vt} /= 2;
+				}
+			}
+		}
+		if ($line =~ /data arrival time/ && $atfound == 0) {
+			$arrivaltime = $fields[-1];
+			$atfound = 1;
+		} elsif ($line =~ /data required time/ && $rtfound == 0) {
+			$requiredtime = $fields[-1];
+			$rtfound = 1;
+		}
+		if ($line =~ /slack \((VIOLATED|MET)\)/) {
+			$rtfound =0; $atfound = 0; 
+			$slack = $fields[-1];
+			my $vt_line = join("/", @vt_count{@cell_vt_pattern});
+			print "$pathNumber $startpoint $startpoint_clock $endpoint $endpoint_clock $pathgroup $pathtype $scenario $logicdepth $buffercount($bufferdelay) $invertercount($inverterdelay) $combocount($combodelay) $vt_line $requiredtime $arrivaltime $slack\n";
+		}
+	}
+} else {
+	print "Cannot generate summary timing report is niether innovus in format nor Primetime\n";
+}
+
+close($fh);
+# --- Helper ---
+sub merge_single_field_lines {
+	my ($fh, $first_line) = @_;
+	my $merged = $first_line;
+	my @fields = split ' ', $first_line;
+	while (@fields == 1) {
+		my $next_line = <$fh>;
+		last unless defined $next_line;
+		chomp($next_line);
+		my @next_fields = split ' ', $next_line;
+		$merged .= " $next_line";
+		last if @next_fields > 1;
+		@fields = @next_fields;
+	}
+	return $merged;
+}
